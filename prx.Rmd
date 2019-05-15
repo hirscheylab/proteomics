@@ -1,0 +1,41 @@
+---
+title: "Proteomic Workflow"
+author: Matthew Hirschey, Alex Adams
+output: html_notebook
+---
+
+## Import Data
+```{r import}
+
+```
+
+## Clean Data
+```{r clean}
+
+```
+
+## Scale/Normalize Data
+```{r scale}
+
+```
+
+## Calculate Differences
+```{r calc}
+
+```
+
+## Statistics
+```{r stats}
+
+```
+
+## EDA
+```{r eda}
+
+```
+
+## Visualize
+```{r viz}
+
+```
+
