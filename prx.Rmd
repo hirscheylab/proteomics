@@ -25,6 +25,7 @@ output: html_notebook
 ```
 
 ## Statistics
+Consider limma package
 ```{r stats}
 
 ```
@@ -39,3 +40,16 @@ output: html_notebook
 
 ```
 
+## Pathway analysis
+Consider Enrichr package
+```{r pathway}
+
+```
+
+## Output
+Export .xls file; or csv? 
+Feather file type?
+Make a template RMD file, and export a standardized report?
+```{r output}
+
+```

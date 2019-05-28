@@ -29,3 +29,5 @@ rsconnect/
 /raw
 *.Rproj
 .DS_Store
+prx.Rmd
+*.nb.html
