@@ -4,9 +4,15 @@ author: Matthew Hirschey, Alex Adams
 output: html_notebook
 ---
 
+## Load Libraries
+```{r}
+library(tidyverse)
+```
+
 ## Import Data
 ```{r import}
-
+peptide_groups_raw <- read_tsv("data/ex1_PeptideGroups.txt")
+proteins_raw <- read_tsv("data/ex1_Proteins.txt")
 ```
 
 ## Clean Data
