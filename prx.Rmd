@@ -7,6 +7,7 @@ output: html_notebook
 ## Load Libraries
 ```{r}
 library(tidyverse)
+library(qvalue)
 ```
 
 ## Import Data
@@ -17,6 +18,281 @@ proteins_raw <- read_tsv("data/ex1_Proteins.txt")
 
 ## Clean Data
 ```{r clean}
+### NORMALIZE THE PEPTIDE ABUNDANCES ###
+
+# CALCULATE THE NORMALIZATION FACTOR
+input_index <- grep("Abundance: F3:", names(peptide_groups_raw))
+sum <- numeric(length(input_index))
+for (i in 1:length(input_index)){
+  sum[i] <- sum(peptide_groups_raw[input_index[i]], na.rm = TRUE)
+}
+avg <- mean(sum)
+norm <- numeric(length(input_index))
+for (i in 1:length(norm)){
+  norm[i] <- sum[i]/avg
+}
+
+# CALCULATE THE NORMALIZED PHOSPHO- AND ACETYL- ABUNDANCES
+phospho_index <- grep("Abundance: F2:", names(peptide_groups_raw))
+acetyl_index <- grep("Abundance: F1:", names(peptide_groups_raw))
+peptide_stats <- bind_cols(tibble(uniqueID = 1:nrow(peptide_groups_raw)),
+                      select(peptide_groups_raw, "Master Protein Accessions"),
+                      tibble("Accession" = NA, Description = NA, GN = NA, .rows = nrow(peptide_groups_raw)),
+                      select(peptide_groups_raw, "Sequence"),
+                      select(peptide_groups_raw, phospho_index),
+                      select(peptide_groups_raw, acetyl_index))
+
+for(i in 1:nrow(peptide_groups_raw)){
+  peptide_stats$Accession[i] <- unlist(strsplit(peptide_groups_raw$`Master Protein Accessions`[i], "; "))[1]
+  if(!is.na(peptide_stats$Accession[i])){
+    peptide_stats$Description[i] <- filter(proteins_raw, Accession == peptide_stats$Accession[i])$Description
+    peptide_stats$GN[i] <- str_extract(peptide_stats$Description[i], "(?<=GN=).*?(?=\\s|$)")
+  }
+}
+
+for(i in 7:(6+length(phospho_index))){
+  peptide_stats[i] <- peptide_stats[i]/norm[i-6]
+}
+
+for(i in 13:(12+length(acetyl_index))){
+  peptide_stats[i] <- peptide_stats[i]/norm[i-12]
+}
+
+### NORMALIZE THE PROTEIN ABUNDANCES ###
+
+# CALCULATE THE NORMALIZED INPUT ABUNDANCES
+input_index <- grep("Abundance: F3:", names(proteins_raw))
+protein_input_norm <- bind_cols(select(proteins_raw, "Accession"),
+                      select(proteins_raw, "Sequence"),
+                      select(proteins_raw, "Master"),
+                      select(proteins_raw, "Exp. q-value"),
+                      select(proteins_raw, input_index))
+
+for(i in 5:length(protein_input_norm)){
+  protein_input_norm[i] <- protein_input_norm[i]/norm[i-4]
+}
+
+# CALCULATE THE LOG2 OF NORMALIZED INPUT ABUNDANCES
+protein_input_norm <- bind_cols(protein_input_norm, log2(protein_input_norm[5:length(protein_input_norm)]))
+names(protein_input_norm)[(length(protein_input_norm)-length(input_index)+1):length(protein_input_norm)] <-
+  paste("LOG2 ", names(protein_input_norm)[(length(protein_input_norm)-length(input_index)+1):length(protein_input_norm)])
+
+# CALCULATE THE LOG2 AVERAGE OF NORMALIZED INPUT ABUNDANCES
+LOG2_AVG <- tibble(LOG2_AVG = NA, .rows = nrow(protein_input_norm))
+for (i in 1:nrow(protein_input_norm)){
+  LOG2_AVG$LOG2_AVG[i] <- mean(as.numeric(protein_input_norm[i, grep("LOG2 ", names(protein_input_norm))]), na.rm = TRUE)
+} 
+protein_input_norm <- bind_cols(protein_input_norm, LOG2_AVG)
+
+# CALCULATE THE LOG2-AVG FOR THE NORMALIZED INPUT ABUNDANCES
+LOG2_NORM <- select(protein_input_norm, grep("LOG2 ", names(protein_input_norm)))
+names(LOG2_NORM) <- gsub("LOG2", "LOG2-AVG", names(LOG2_NORM))
+for(i in 1:nrow(protein_input_norm)){
+  LOG2_NORM[i,] <- LOG2_NORM[i,] - protein_input_norm$LOG2_AVG[i]
+}
+protein_input_norm <- bind_cols(protein_input_norm, LOG2_NORM)
+
+# CALCULATE PBS/OCT-SPECIFIC STATS, THE LOG2 FOLD CHANGE, AND P-VALUE
+pbs_index <- intersect(grep("LOG2-AVG", names(protein_input_norm)), grep("PBS", names(protein_input_norm)))
+protein_input_norm <- mutate(protein_input_norm, PBS_AVG = rowMeans(protein_input_norm[pbs_index]))
+
+oct_index <- intersect(grep("LOG2-AVG", names(protein_input_norm)), grep("Octanoate", names(protein_input_norm)))
+protein_input_norm <- mutate(protein_input_norm, OCT_AVG = rowMeans(protein_input_norm[oct_index]))
+
+protein_input_norm <- mutate(protein_input_norm, PBS_STDEV = apply(protein_input_norm[pbs_index], 1, sd))
+protein_input_norm <- mutate(protein_input_norm, OCT_STDEV = apply(protein_input_norm[oct_index], 1, sd))
+protein_input_norm <- mutate(protein_input_norm, LOG2_FOLD_CHANGE = protein_input_norm$OCT_AVG - protein_input_norm$PBS_AVG)
+protein_input_norm <- mutate(protein_input_norm, P_VALUE = NA)
+
+for (i in 1:nrow(protein_input_norm)){
+  if (!(NA %in% as.numeric(protein_input_norm[pbs_index][i,]))){
+    protein_input_norm$P_VALUE[i] <- t.test(as.numeric(protein_input_norm[pbs_index][i,]), 
+                                            as.numeric(protein_input_norm[oct_index][i,]),
+                                            alternative = "two.sided", var.equal = TRUE)$p.val
+  }
+}
+protein_significant <- filter(protein_input_norm, Master == "IsMasterProtein" & `Exp. q-value` < 0.01)
+protein_significant <- mutate(protein_significant, Q_VALUE = p.adjust(protein_significant$P_VALUE, method = "fdr"))
+
+
+
+
+# CALCULATE STATISTICS FOR PHOSPHOPEPTIDE QUANT, WITH AND WITHOUT NORMALIZATION TO SPECIFIC TRAGET PROTEINS. PULL IN PROTEIN METADATA TO THE PTM LEVEL OUTPUT.
+
+peptide_stats <- left_join(peptide_stats, select(protein_input_norm, "Accession", grep("LOG2-AVG", names(protein_input_norm))), by = "Accession")
+input_index <- grep("LOG2-AVG", names(peptide_stats))
+
+phospho_index <- grep("Abundance: F2:", names(peptide_stats))
+peptide_stats_phospho <- select(peptide_stats, "uniqueID", "Accession", "Description", "GN", input_index, phospho_index)
+
+# CALCULATE THE LOG2 OF PHOSPHOPEPTIDE ABUNDANCES
+peptide_stats_phospho <- bind_cols(peptide_stats_phospho, log2(peptide_stats_phospho[11:length(peptide_stats_phospho)]))
+names(peptide_stats_phospho)[(length(peptide_stats_phospho)-length(phospho_index)+1):length(peptide_stats_phospho)] <-
+  paste("LOG2 ", names(peptide_stats_phospho)[(length(peptide_stats_phospho)-length(phospho_index)+1):length(peptide_stats_phospho)])
+
+# CALCULATE THE LOG2 AVERAGE OF NORMALIZED INPUT ABUNDANCES
+LOG2_AVG <- tibble(LOG2_AVG = NA, .rows = nrow(peptide_stats_phospho))
+for (i in 1:nrow(peptide_stats_phospho)){
+  LOG2_AVG$LOG2_AVG[i] <- mean(as.numeric(peptide_stats_phospho[i, grep("LOG2 ", names(peptide_stats_phospho))]), na.rm = TRUE)
+} 
+peptide_stats_phospho <- bind_cols(peptide_stats_phospho, LOG2_AVG)
+
+# CALCULATE THE LOG2-AVG FOR THE NORMALIZED INPUT ABUNDANCES
+LOG2_NORM <- select(peptide_stats_phospho, grep("LOG2 ", names(peptide_stats_phospho)))
+names(LOG2_NORM) <- gsub("LOG2", "LOG2-AVG", names(LOG2_NORM))
+for(i in 1:nrow(peptide_stats_phospho)){
+  LOG2_NORM[i,] <- LOG2_NORM[i,] - peptide_stats_phospho$LOG2_AVG[i]
+}
+peptide_stats_phospho <- bind_cols(peptide_stats_phospho, LOG2_NORM)
+
+# CALCULATE PBS/OCT-SPECIFIC STATS, THE LOG2 FOLD CHANGE, AND P-VALUE
+pbs_index <- intersect(intersect(grep("LOG2-AVG", names(peptide_stats_phospho)), 
+                       grep("PBS", names(peptide_stats_phospho))), 
+                       grep("Phospho", names(peptide_stats_phospho)))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, PBS_AVG = rowMeans(peptide_stats_phospho[pbs_index]))
+
+oct_index <- intersect(intersect(grep("LOG2-AVG", names(peptide_stats_phospho)), 
+                       grep("Octanoate", names(peptide_stats_phospho))),
+                       grep("Phospho", names(peptide_stats_phospho)))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, OCT_AVG = rowMeans(peptide_stats_phospho[oct_index]))
+
+peptide_stats_phospho <- mutate(peptide_stats_phospho, PBS_STDEV = apply(peptide_stats_phospho[pbs_index], 1, sd))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, OCT_STDEV = apply(peptide_stats_phospho[oct_index], 1, sd))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, LOG2_FOLD_CHANGE = peptide_stats_phospho$OCT_AVG - peptide_stats_phospho$PBS_AVG)
+peptide_stats_phospho <- mutate(peptide_stats_phospho, P_VALUE = NA)
+
+for (i in 1:nrow(peptide_stats_phospho)){
+  if (!(NA %in% as.numeric(peptide_stats_phospho[pbs_index][i,]))){
+    peptide_stats_phospho$P_VALUE[i] <- t.test(as.numeric(peptide_stats_phospho[pbs_index][i,]), 
+                                            as.numeric(peptide_stats_phospho[oct_index][i,]),
+                                            alternative = "two.sided", var.equal = TRUE)$p.val
+  }
+}
+
+# CALCULATE THE RELATIVE PHOSPHO OCCUPANCY
+LOG2_NORM <- select(peptide_stats_phospho, intersect(grep("LOG2-AVG", names(peptide_stats_phospho)),
+                                                     grep("Phospho", names(peptide_stats_phospho))))
+names(LOG2_NORM) <- gsub("LOG2-AVG", "Relative LOG2-AVG", names(LOG2_NORM))
+
+LOG2_REL <- select(peptide_stats_phospho, intersect(grep("LOG2-AVG", names(peptide_stats_phospho)),
+                                                    grep("Input", names(peptide_stats_phospho))))
+LOG2_NORM <- LOG2_NORM - LOG2_REL
+peptide_stats_phospho <- bind_cols(peptide_stats_phospho, LOG2_NORM)
+
+# CALCULATE RELATIVE PBS/OCT-SPECIFIC STATS, THE LOG2 FOLD CHANGE, AND P-VALUE
+pbs_index <- intersect(intersect(grep("Relative LOG2-AVG", names(peptide_stats_phospho)), 
+                       grep("PBS", names(peptide_stats_phospho))), 
+                       grep("Phospho", names(peptide_stats_phospho)))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, RELATIVE_PBS_AVG = rowMeans(peptide_stats_phospho[pbs_index]))
+
+oct_index <- intersect(intersect(grep("Relative LOG2-AVG", names(peptide_stats_phospho)), 
+                       grep("Octanoate", names(peptide_stats_phospho))),
+                       grep("Phospho", names(peptide_stats_phospho)))
+
+peptide_stats_phospho <- mutate(peptide_stats_phospho, RELATIVE_OCT_AVG = rowMeans(peptide_stats_phospho[oct_index]))
+
+peptide_stats_phospho <- mutate(peptide_stats_phospho, RELATIVE_PBS_STDEV = apply(peptide_stats_phospho[pbs_index], 1, sd))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, RELATIVE_OCT_STDEV = apply(peptide_stats_phospho[oct_index], 1, sd))
+peptide_stats_phospho <- mutate(peptide_stats_phospho, RELATIVE_LOG2_FOLD_CHANGE = peptide_stats_phospho$RELATIVE_OCT_AVG -
+                                  peptide_stats_phospho$RELATIVE_PBS_AVG)
+peptide_stats_phospho <- mutate(peptide_stats_phospho, RELATIVE_P_VALUE = NA)
+
+for (i in 1:nrow(peptide_stats_phospho)){
+  if (!(NA %in% as.numeric(peptide_stats_phospho[pbs_index][i,]))){
+    peptide_stats_phospho$RELATIVE_P_VALUE[i] <- t.test(as.numeric(peptide_stats_phospho[pbs_index][i,]), 
+                                            as.numeric(peptide_stats_phospho[oct_index][i,]),
+                                            alternative = "two.sided", var.equal = TRUE)$p.val
+  }
+}
+
+
+
+# CALCULATE STATISTICS FOR ACETYLPEPTIDE QUANT, WITH AND WITHOUT NORMALIZATION TO SPECIFIC TRAGET PROTEINS. PULL IN PROTEIN METADATA TO THE PTM LEVEL OUTPUT.
+
+input_index <- grep("LOG2-AVG", names(peptide_stats))
+
+acetyl_index <- grep("Abundance: F1:", names(peptide_stats))
+peptide_stats_acetyl <- select(peptide_stats, "uniqueID", "Accession", "Description", "GN", input_index, acetyl_index)
+
+# CALCULATE THE LOG2 OF PHOSPHOPEPTIDE ABUNDANCES
+peptide_stats_acetyl <- bind_cols(peptide_stats_acetyl, log2(peptide_stats_acetyl[11:length(peptide_stats_acetyl)]))
+names(peptide_stats_acetyl)[(length(peptide_stats_acetyl)-length(acetyl_index)+1):length(peptide_stats_acetyl)] <-
+  paste("LOG2 ", names(peptide_stats_acetyl)[(length(peptide_stats_acetyl)-length(acetyl_index)+1):length(peptide_stats_acetyl)])
+
+# CALCULATE THE LOG2 AVERAGE OF NORMALIZED INPUT ABUNDANCES
+LOG2_AVG <- tibble(LOG2_AVG = NA, .rows = nrow(peptide_stats_acetyl))
+for (i in 1:nrow(peptide_stats_acetyl)){
+  LOG2_AVG$LOG2_AVG[i] <- mean(as.numeric(peptide_stats_acetyl[i, grep("LOG2 ", names(peptide_stats_acetyl))]), na.rm = TRUE)
+} 
+peptide_stats_acetyl <- bind_cols(peptide_stats_acetyl, LOG2_AVG)
+
+# CALCULATE THE LOG2-AVG FOR THE NORMALIZED INPUT ABUNDANCES
+LOG2_NORM <- select(peptide_stats_acetyl, grep("LOG2 ", names(peptide_stats_acetyl)))
+names(LOG2_NORM) <- gsub("LOG2", "LOG2-AVG", names(LOG2_NORM))
+for(i in 1:nrow(peptide_stats_acetyl)){
+  LOG2_NORM[i,] <- LOG2_NORM[i,] - peptide_stats_acetyl$LOG2_AVG[i]
+}
+peptide_stats_acetyl <- bind_cols(peptide_stats_acetyl, LOG2_NORM)
+
+# CALCULATE PBS/OCT-SPECIFIC STATS, THE LOG2 FOLD CHANGE, AND P-VALUE
+pbs_index <- intersect(intersect(grep("LOG2-AVG", names(peptide_stats_acetyl)), 
+                                 grep("PBS", names(peptide_stats_acetyl))), 
+                       grep("Acetyl", names(peptide_stats_acetyl)))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, PBS_AVG = rowMeans(peptide_stats_acetyl[pbs_index]))
+
+oct_index <- intersect(intersect(grep("LOG2-AVG", names(peptide_stats_acetyl)), 
+                                 grep("Octanoate", names(peptide_stats_acetyl))),
+                       grep("Acetyl", names(peptide_stats_acetyl)))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, OCT_AVG = rowMeans(peptide_stats_acetyl[oct_index]))
+
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, PBS_STDEV = apply(peptide_stats_acetyl[pbs_index], 1, sd))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, OCT_STDEV = apply(peptide_stats_acetyl[oct_index], 1, sd))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, LOG2_FOLD_CHANGE = peptide_stats_acetyl$OCT_AVG - peptide_stats_acetyl$PBS_AVG)
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, P_VALUE = NA)
+
+for (i in 1:nrow(peptide_stats_acetyl)){
+  if (!(NA %in% as.numeric(peptide_stats_acetyl[pbs_index][i,]))){
+    peptide_stats_acetyl$P_VALUE[i] <- t.test(as.numeric(peptide_stats_acetyl[pbs_index][i,]), 
+                                               as.numeric(peptide_stats_acetyl[oct_index][i,]),
+                                               alternative = "two.sided", var.equal = TRUE)$p.val
+  }
+}
+
+# CALCULATE THE RELATIVE PHOSPHO OCCUPANCY
+LOG2_NORM <- select(peptide_stats_acetyl, intersect(grep("LOG2-AVG", names(peptide_stats_acetyl)),
+                                                     grep("Acetyl", names(peptide_stats_acetyl))))
+names(LOG2_NORM) <- gsub("LOG2-AVG", "Relative LOG2-AVG", names(LOG2_NORM))
+
+LOG2_REL <- select(peptide_stats_acetyl, intersect(grep("LOG2-AVG", names(peptide_stats_acetyl)),
+                                                    grep("Input", names(peptide_stats_acetyl))))
+LOG2_NORM <- LOG2_NORM - LOG2_REL
+peptide_stats_acetyl <- bind_cols(peptide_stats_acetyl, LOG2_NORM)
+
+# CALCULATE RELATIVE PBS/OCT-SPECIFIC STATS, THE LOG2 FOLD CHANGE, AND P-VALUE
+pbs_index <- intersect(intersect(grep("Relative LOG2-AVG", names(peptide_stats_acetyl)), 
+                                 grep("PBS", names(peptide_stats_acetyl))), 
+                       grep("Acetyl", names(peptide_stats_acetyl)))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, RELATIVE_PBS_AVG = rowMeans(peptide_stats_acetyl[pbs_index]))
+
+oct_index <- intersect(intersect(grep("Relative LOG2-AVG", names(peptide_stats_acetyl)), 
+                                 grep("Octanoate", names(peptide_stats_acetyl))),
+                       grep("Acetyl", names(peptide_stats_acetyl)))
+
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, RELATIVE_OCT_AVG = rowMeans(peptide_stats_acetyl[oct_index]))
+
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, RELATIVE_PBS_STDEV = apply(peptide_stats_acetyl[pbs_index], 1, sd))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, RELATIVE_OCT_STDEV = apply(peptide_stats_acetyl[oct_index], 1, sd))
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, RELATIVE_LOG2_FOLD_CHANGE = peptide_stats_acetyl$RELATIVE_OCT_AVG -
+                                  peptide_stats_acetyl$RELATIVE_PBS_AVG)
+peptide_stats_acetyl <- mutate(peptide_stats_acetyl, RELATIVE_P_VALUE = NA)
+
+for (i in 1:nrow(peptide_stats_acetyl)){
+  if (!(NA %in% as.numeric(peptide_stats_acetyl[pbs_index][i,]))){
+    peptide_stats_acetyl$RELATIVE_P_VALUE[i] <- t.test(as.numeric(peptide_stats_acetyl[pbs_index][i,]), 
+                                                        as.numeric(peptide_stats_acetyl[oct_index][i,]),
+                                                        alternative = "two.sided", var.equal = TRUE)$p.val
+  }
+}
 
 ```
 
