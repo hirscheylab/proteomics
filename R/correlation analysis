@@ -1,0 +1,31 @@
+library(ggpubr)
+library(tidyverse)
+install.packages("corrplot")
+library(corrplot)
+
+#data manipulation
+peptide_data <- na.omit(read_csv("~/raw/peptide_data.csv"))
+peptide_data_formatted <- tibble(ID = names(peptide_data)[2:length(names(peptide_data))],
+                               Group = str_sub(names(peptide_data)[2:length(names(peptide_data))], -1))
+transposed_data <- t(peptide_data)[2:ncol(peptide_data), ]
+colnames(transposed_data) <- peptide_data$GN
+rownames(transposed_data) <- NULL
+peptide_data_formatted <- cbind(peptide_data_formatted, transposed_data)
+duplicate = which(duplicated(names(peptide_data_formatted)))
+peptide_data_formatted = peptide_data_formatted[,-duplicate]
+
+#statistics
+res <- cor.test(as.numeric(peptide_data_formatted$NCOA7), as.numeric(peptide_data_formatted$BOD1L1), 
+                    method = "spearman", use = "complete.obs")
+
+#heatmap
+install.packages("corrplot")
+library(corrplot)
+peptide_matrix <- data.matrix(peptide_data_formatted)
+peptide_heatmap <- heatmap(c.data, Rowv=NA, Colv=NA, col = cm.colors(256), scale="column", margins=c(5,10))
+
+#heatmap from correlationmatrix
+drops <- c("ID", "Group")
+peptide_data_formatted <- peptide_data_formatted[,!(names(peptide_data_formatted) %in% drops)]
+c.data <- as.matrix(round(cor(sapply((peptide_data_formatted), as.numeric)), 3))
+c <- corrplot(c.data, method = "color")
